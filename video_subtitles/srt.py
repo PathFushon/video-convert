@@ -49,6 +49,20 @@ def format_timestamp_srt(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{sec:02d},{ms:03d}"
 
 
+def format_timestamp_ass(seconds: float) -> str:
+    """Форматирует секунды в таймкод ASS вида H:MM:SS.cc."""
+    if seconds < 0:
+        seconds = 0.0
+    total_cs = int(round(seconds * 100))
+    cs = total_cs % 100
+    total_sec = total_cs // 100
+    sec = total_sec % 60
+    total_min = total_sec // 60
+    minutes = total_min % 60
+    hours = total_min // 60
+    return f"{hours}:{minutes:02d}:{sec:02d}.{cs:02d}"
+
+
 def parse_timestamp(value: Union[str, int, float]) -> float:
     """Преобразует число секунд или строку вида HH:MM:SS,mmm / MM:SS.mmm в float."""
     if isinstance(value, (int, float)):

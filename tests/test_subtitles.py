@@ -314,5 +314,63 @@ def test_auto_subtitle_pipeline_with_mocked_whisper(
     )
     assert res.video_result.output_path.is_file()
     assert res.srt_path is not None and res.srt_path.is_file()
+    assert res.srt_path.name == "auto_out_subtitles.srt"
     assert len(parse_srt(res.srt_path.read_text(encoding="utf-8"))) == 2
+
+
+def test_1080p_subtitle_scale_stays_at_bottom(tmp_path: Path) -> None:
+    ffmpeg = find_ffmpeg()
+    vid = tmp_path / "hd1080.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=1920x1080:d=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(vid),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    out = tmp_path / "hd1080_sub.mp4"
+    add_subtitles(
+        vid,
+        [SubtitleCue(0.0, 1.0, "Проверка масштаба субтитров\nВторая строка текста")],
+        out,
+        mode="hard",
+        style=SubtitleStyle(font_name="DejaVu Sans", font_size=28, alignment="bottom"),
+        preset="ultrafast",
+    )
+    raw = subprocess.run(
+        [
+            ffmpeg,
+            "-ss",
+            "0.5",
+            "-i",
+            str(out),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    dark_ys = [
+        y
+        for y in range(1080)
+        if any(raw[y * 1920 * 3 + x * 3] < 100 for x in range(0, 1920, 8))
+    ]
+    assert dark_ys
+    assert min(dark_ys) > 850
+    assert (max(dark_ys) - min(dark_ys)) < 150
 

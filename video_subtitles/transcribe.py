@@ -368,15 +368,19 @@ def auto_subtitle_video(
 
     saved_srt: Optional[Path] = None
     if save_srt:
-        target_srt = (
-            Path(srt_output_path)
-            if srt_output_path is not None
-            else (
-                Path(output_path).with_suffix(".srt")
-                if output_path is not None
-                else src.with_suffix(".srt")
+        if srt_output_path is not None:
+            target_srt = Path(srt_output_path)
+        elif output_path is not None:
+            out_p = Path(output_path)
+            # Не называем .srt так же, как выходное hardsub-видео,
+            # иначе плеер (VLC/PotPlayer) покажет субтитры второй раз поверх кадра.
+            target_srt = (
+                out_p.with_name(f"{out_p.stem}_subtitles.srt")
+                if mode == "hard"
+                else out_p.with_suffix(".srt")
             )
-        )
+        else:
+            target_srt = src.with_suffix(".srt")
         saved_srt = write_srt(cues, target_srt)
 
     if status_callback:

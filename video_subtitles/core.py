@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Callable, Literal, Optional, Sequence, Union
 
 from .fonts import find_default_font_name
-from .srt import SubtitleCue, cues_from_json, parse_srt, shift_cues, write_srt
+from .srt import (
+    SubtitleCue,
+    cues_from_json,
+    format_timestamp_ass,
+    parse_srt,
+    shift_cues,
+    write_srt,
+)
 
 SubtitleMode = Literal["hard", "soft"]
 
@@ -349,6 +356,70 @@ def _prepare_subtitle_file(
     return out_srt, ".srt"
 
 
+def _compute_play_res(width: Optional[int], height: Optional[int]) -> tuple[int, int]:
+    """Подбирает эталонное разрешение PlayRes (на базе 720p), чтобы шрифт масштабировался одинаково на HD/FHD/4K."""
+    if not width or not height or width <= 0 or height <= 0:
+        return 1280, 720
+    if width >= height:
+        play_y = 720
+        play_x = max(2, int(round(720 * width / height)))
+        return play_x, play_y
+    play_x = 720
+    play_y = max(2, int(round(720 * height / width)))
+    return play_x, play_y
+
+
+def _write_styled_ass(
+    cues: Sequence[SubtitleCue],
+    style: SubtitleStyle,
+    out_path: Path,
+    width: Optional[int],
+    height: Optional[int],
+) -> Path:
+    """Генерирует ASS-файл с корректным PlayResX/PlayResY и заданным стилем."""
+    play_x, play_y = _compute_play_res(width, height)
+    font = style.font_name if style.font_name is not None else (find_default_font_name() or "Arial")
+    primary = color_to_ass(style.primary_color)
+    outline = color_to_ass(style.outline_color)
+    back = color_to_ass(style.back_color)
+    bold_flag = -1 if style.bold else 0
+    italic_flag = -1 if style.italic else 0
+    align = style.resolved_alignment()
+
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {play_x}",
+        f"PlayResY: {play_y}",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,{font},{int(style.font_size)},{primary},&H000000FF,{outline},{back},"
+        f"{bold_flag},{italic_flag},0,0,100,100,0,0,{int(style.border_style)},"
+        f"{style.outline:g},{style.shadow:g},{align},{int(style.margin_l)},{int(style.margin_r)},"
+        f"{int(style.margin_v)},1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    for cue in cues:
+        start_ass = format_timestamp_ass(cue.start)
+        end_ass = format_timestamp_ass(cue.end)
+        text_ass = (
+            cue.text.replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .replace("\n", "\\N")
+        )
+        lines.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text_ass}")
+
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
+
+
 def add_subtitles(
     video_path: Union[str, Path],
     subtitle_source: Union[str, Path, Sequence[SubtitleCue]],
@@ -422,6 +493,21 @@ def add_subtitles(
         if mode == "hard":
             cmd.extend(["-i", str(src_video)])
 
+            eff_style = style or SubtitleStyle()
+            generated_ass = False
+            if sub_ext == ".srt":
+                parsed_cues = parse_srt(sub_file.read_text(encoding="utf-8-sig"))
+                if parsed_cues:
+                    sub_file = _write_styled_ass(
+                        parsed_cues,
+                        eff_style,
+                        Path(tmp) / "styled.ass",
+                        info.width,
+                        info.height,
+                    )
+                    sub_ext = ".ass"
+                    generated_ass = True
+
             filter_opts = [f"filename={escape_ffmpeg_filter_value(str(sub_file))}"]
             if fonts_dir is not None:
                 fdir = Path(fonts_dir)
@@ -430,8 +516,7 @@ def add_subtitles(
                 filter_opts.append(f"fontsdir={escape_ffmpeg_filter_value(str(fdir.resolve()))}")
 
             is_ass = sub_ext in {".ass", ".ssa"}
-            if not is_ass or apply_style_to_ass:
-                eff_style = style or SubtitleStyle()
+            if not generated_ass and (not is_ass or apply_style_to_ass):
                 force_style = eff_style.to_ass_force_style()
                 # Внутри одинарных кавычек force_style='...' запятые допустимы
                 safe_force = force_style.replace("'", "\\'")

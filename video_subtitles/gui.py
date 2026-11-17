@@ -268,7 +268,7 @@ class SubtitleApp:
         self._lang_labels = {label: key for key, label in WHISPER_LANGUAGES.items()}
         self.speech_lang_label_var = tk.StringVar(value=WHISPER_LANGUAGES["auto"])
         self.translate_var = tk.BooleanVar(value=False)
-        self.save_srt_var = tk.BooleanVar(value=True)
+        self.save_srt_var = tk.BooleanVar(value=False)
         self.review_before_burn_var = tk.BooleanVar(value=False)
 
         # Режим наложения
@@ -951,11 +951,14 @@ class SubtitleApp:
 
                 saved_srt: Optional[Path] = None
                 if save_srt:
-                    target_srt = (
-                        out_path.with_suffix(".srt")
-                        if out_path is not None
-                        else Path(video_str).with_suffix(".srt")
-                    )
+                    if out_path is not None:
+                        target_srt = (
+                            out_path.with_name(f"{out_path.stem}_subtitles.srt")
+                            if mode == "hard"
+                            else out_path.with_suffix(".srt")
+                        )
+                    else:
+                        target_srt = Path(video_str).with_suffix(".srt")
                     saved_srt = write_srt(cues, target_srt)
 
                 if review_before_burn:
