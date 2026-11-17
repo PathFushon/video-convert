@@ -4,22 +4,69 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
 PREFERRED_FONTS = (
     "DejaVu Sans",
+    "Arial",
     "Liberation Sans",
     "Noto Sans",
-    "Arial",
+    "Segoe UI",
+    "Tahoma",
     "Helvetica",
     "Ubuntu",
     "FreeSans",
 )
 
 
+def _list_windows_fonts() -> list[str]:
+    """Читает установленные шрифты из реестра Windows."""
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return []
+
+    families: set[str] = set()
+    reg_paths = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"),
+    )
+    for hive, subkey in reg_paths:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                count = winreg.QueryInfoKey(key)[1]
+                for i in range(count):
+                    name, _, _ = winreg.EnumValue(key, i)
+                    # Убираем суффиксы вида " (TrueType)" / " (OpenType)"
+                    clean = name.split(" (")[0].strip()
+                    # Убираем начертания в конце вроде Bold / Italic для базового имени
+                    for suffix in (
+                        " Bold Italic",
+                        " Bold",
+                        " Italic",
+                        " Regular",
+                        " Semibold",
+                        " Light",
+                        " Medium",
+                    ):
+                        if clean.endswith(suffix) and len(clean) > len(suffix):
+                            clean = clean[: -len(suffix)].strip()
+                    if clean:
+                        families.add(clean)
+        except OSError:
+            continue
+    return sorted(families)
+
+
 def list_system_fonts() -> list[str]:
-    """Возвращает список доступных семейств шрифтов через fc-list (если установлен)."""
+    """Возвращает список доступных семейств шрифтов."""
+    if sys.platform == "win32":
+        win_fonts = _list_windows_fonts()
+        if win_fonts:
+            return win_fonts
+
     fc_list = shutil.which("fc-list")
     if fc_list:
         try:
@@ -51,7 +98,6 @@ def find_default_font_name() -> Optional[str]:
             if candidate in available:
                 return candidate
 
-    # Fallback: проверяем популярные файлы шрифтов на диске
     font_paths = (
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
         Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),

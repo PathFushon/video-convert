@@ -6,10 +6,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Sequence, Union
+from typing import Callable, Literal, Optional, Sequence, Union
 
 from .fonts import find_default_font_name
 from .srt import SubtitleCue, cues_from_json, parse_srt, shift_cues, write_srt
@@ -199,6 +200,15 @@ def find_ffmpeg(ffmpeg_path: Optional[Union[str, Path]] = None) -> str:
     )
 
 
+def _subprocess_no_window_kwargs() -> dict[str, object]:
+    """Скрывает консольное окно FFmpeg при запуске из GUI на Windows."""
+    if sys.platform == "win32":
+        flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flag:
+            return {"creationflags": flag}
+    return {}
+
+
 def probe_video(
     video_path: Union[str, Path],
     ffmpeg_path: Optional[Union[str, Path]] = None,
@@ -214,6 +224,7 @@ def probe_video(
         capture_output=True,
         text=True,
         check=False,
+        **_subprocess_no_window_kwargs(),  # type: ignore[arg-type]
     )
     info_text = proc.stderr or ""
 
@@ -357,6 +368,7 @@ def add_subtitles(
     fonts_dir: Optional[Union[str, Path]] = None,
     overwrite: bool = True,
     ffmpeg_path: Optional[Union[str, Path]] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> SubtitleResult:
     """Добавляет субтитры к видео в режиме hardsub (вживление) или softsub (дорожка).
 
@@ -474,12 +486,54 @@ def add_subtitles(
             cmd.append(str(dst_video))
 
         env = os.environ.copy()
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
-        if proc.returncode != 0:
-            err_tail = "\n".join(proc.stderr.splitlines()[-15:])
-            raise SubtitleError(
-                f"FFmpeg завершился с ошибкой (код {proc.returncode}):\n{err_tail}"
+        extra_kw = _subprocess_no_window_kwargs()
+
+        if progress_callback is not None:
+            run_cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+            proc_p = subprocess.Popen(
+                run_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                **extra_kw,  # type: ignore[arg-type]
             )
+            progress_callback(0.0)
+            total_us = (info.duration * 1_000_000.0) if info.duration and info.duration > 0 else None
+            assert proc_p.stdout is not None
+            for line in proc_p.stdout:
+                line = line.strip()
+                if line.startswith("out_time_us=") and total_us:
+                    try:
+                        cur_us = int(line.split("=", 1)[1])
+                        ratio = max(0.0, min(0.99, cur_us / total_us))
+                        progress_callback(ratio)
+                    except ValueError:
+                        pass
+                elif line == "progress=end":
+                    progress_callback(1.0)
+            stderr_text = proc_p.stderr.read() if proc_p.stderr else ""
+            rc = proc_p.wait()
+            if rc != 0:
+                err_tail = "\n".join(stderr_text.splitlines()[-15:])
+                raise SubtitleError(
+                    f"FFmpeg завершился с ошибкой (код {rc}):\n{err_tail}"
+                )
+            progress_callback(1.0)
+        else:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+                **extra_kw,  # type: ignore[arg-type]
+            )
+            if proc.returncode != 0:
+                err_tail = "\n".join(proc.stderr.splitlines()[-15:])
+                raise SubtitleError(
+                    f"FFmpeg завершился с ошибкой (код {proc.returncode}):\n{err_tail}"
+                )
 
     return SubtitleResult(
         output_path=dst_video,

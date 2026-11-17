@@ -167,10 +167,21 @@ def test_hardsub_special_filename_and_no_audio(tmp_path: Path) -> None:
     write_srt([SubtitleCue(0.0, 1.5, "Привет!")], srt_path)
 
     out = tmp_path / "out_silent.mp4"
-    add_subtitles(src, srt_path, out, mode="hard", preset="ultrafast")
+    progress_values: list[float] = []
+    add_subtitles(
+        src,
+        srt_path,
+        out,
+        mode="hard",
+        preset="ultrafast",
+        progress_callback=progress_values.append,
+    )
     info = probe_video(out)
     assert info.has_video is True
     assert info.has_audio is False
+    assert progress_values
+    assert progress_values[0] == 0.0
+    assert progress_values[-1] == 1.0
 
 
 def test_softsub_mp4_and_mkv(tmp_path: Path) -> None:
