@@ -1,0 +1,2 @@
+imageio-ffmpeg>=0.4.9
+pywhispercpp>=1.2.0
