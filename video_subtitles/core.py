@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Optional, Sequence, Union
@@ -230,6 +232,8 @@ def probe_video(
         [ffmpeg, "-hide_banner", "-i", str(video)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
         **_subprocess_no_window_kwargs(),  # type: ignore[arg-type]
     )
@@ -580,9 +584,23 @@ def add_subtitles(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=env,
                 **extra_kw,  # type: ignore[arg-type]
             )
+            # Читаем stderr параллельно в отдельном потоке, чтобы буфер канала на Windows не блокировал FFmpeg
+            stderr_tail: deque[str] = deque(maxlen=40)
+
+            def _drain_stderr() -> None:
+                if proc_p.stderr is None:
+                    return
+                for err_line in proc_p.stderr:
+                    stderr_tail.append(err_line.rstrip("\r\n"))
+
+            err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            err_thread.start()
+
             progress_callback(0.0)
             total_us = (info.duration * 1_000_000.0) if info.duration and info.duration > 0 else None
             assert proc_p.stdout is not None
@@ -597,12 +615,12 @@ def add_subtitles(
                         pass
                 elif line == "progress=end":
                     progress_callback(1.0)
-            stderr_text = proc_p.stderr.read() if proc_p.stderr else ""
             rc = proc_p.wait()
+            err_thread.join(timeout=5.0)
             if rc != 0:
-                err_tail = "\n".join(stderr_text.splitlines()[-15:])
+                err_text = "\n".join(list(stderr_tail)[-15:])
                 raise SubtitleError(
-                    f"FFmpeg завершился с ошибкой (код {rc}):\n{err_tail}"
+                    f"FFmpeg завершился с ошибкой (код {rc}):\n{err_text}"
                 )
             progress_callback(1.0)
         else:
@@ -610,6 +628,8 @@ def add_subtitles(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=env,
                 check=False,
                 **extra_kw,  # type: ignore[arg-type]

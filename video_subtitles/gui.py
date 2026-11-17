@@ -907,7 +907,13 @@ class SubtitleApp:
 
         def finish_render(sub_source, srt_saved: Optional[Path]) -> None:
             try:
-                set_status("Наложение субтитров на видео...")
+                set_status("Наложение субтитров на видео: 0%")
+
+                def on_render_progress(r: float) -> None:
+                    overall = (55.0 + r * 45.0) if src_mode == "auto" else (r * 100.0)
+                    set_progress(overall)
+                    set_status(f"Наложение субтитров на видео: {r * 100.0:.0f}%")
+
                 res = add_subtitles(
                     video_path=video_str,
                     subtitle_source=sub_source,
@@ -920,9 +926,7 @@ class SubtitleApp:
                     default_track=default_track,
                     crf=crf,
                     preset=preset,
-                    progress_callback=lambda r: set_progress(
-                        (55.0 + r * 45.0) if src_mode == "auto" else (r * 100.0)
-                    ),
+                    progress_callback=on_render_progress,
                 )
                 self.root.after(0, lambda: self._on_success(res, srt_saved))
             except Exception as exc:
