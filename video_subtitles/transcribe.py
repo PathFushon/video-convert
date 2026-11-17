@@ -7,10 +7,12 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-import numpy as np
 import requests
+
+if TYPE_CHECKING:
+    import numpy as np
 
 from .core import (
     SubtitleError,
@@ -139,8 +141,10 @@ def ensure_whisper_model(
 def extract_audio_16k_mono(
     video_path: str | Path,
     ffmpeg_path: Optional[str | Path] = None,
-) -> np.ndarray:
+) -> "np.ndarray":
     """Извлекает моно-аудио 16 кГц (float32) из видео через FFmpeg без временных файлов."""
+    import numpy as np
+
     src = Path(video_path)
     if not src.is_file():
         raise FileNotFoundError(f"Видеофайл не найден: {src}")
