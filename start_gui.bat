@@ -12,7 +12,7 @@ if not exist "%~dp0.venv\Scripts\python.exe" (
     )
 )
 
-"%~dp0.venv\Scripts\python.exe" -c "import imageio_ffmpeg, pywhispercpp, requests" >nul 2>&1
+"%~dp0.venv\Scripts\python.exe" -c "import imageio_ffmpeg, pywhispercpp" >nul 2>&1
 if errorlevel 1 (
     echo Installing/updating dependencies (FFmpeg + Whisper AI)...
     "%~dp0.venv\Scripts\python.exe" -m pip install -r "%~dp0requirements.txt"

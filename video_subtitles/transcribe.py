@@ -5,11 +5,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
-
-import requests
 
 if TYPE_CHECKING:
     import numpy as np
@@ -108,14 +107,19 @@ def ensure_whisper_model(
         status_callback(f"Скачивание модели Whisper ({model_name})...")
 
     try:
-        with requests.get(url, stream=True, timeout=30) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "video-subtitles/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            total_hdr = resp.headers.get("Content-Length") or resp.headers.get("content-length")
+            total = int(total_hdr) if total_hdr else 0
             downloaded = 0
             with open(part_file, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1024 * 256):
+                while True:
+                    chunk = resp.read(1024 * 256)
                     if not chunk:
-                        continue
+                        break
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total > 0:
