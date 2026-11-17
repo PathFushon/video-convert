@@ -1,4 +1,4 @@
-"""CLI-интерфейс для добавления субтитров на видео."""
+"""CLI-интерфейс для автоматического создания и добавления субтитров на видео."""
 
 from __future__ import annotations
 
@@ -8,21 +8,24 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .core import SubtitleError, SubtitleStyle, add_subtitles
+from .transcribe import WHISPER_MODELS, auto_subtitle_video
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="add_subtitles.py",
         description=(
-            "Добавляет субтитры (.srt, .ass, .ssa, .vtt, .json) на видео: "
-            "вжённые в кадр (hard) или как отдельная переключаемая дорожка (soft)."
+            "Создаёт субтитры автоматически по речи из видео (Whisper) или берёт готовый файл "
+            "(.srt, .ass, .ssa, .vtt, .json) и добавляет их на видео."
         ),
     )
     parser.add_argument("video", type=Path, help="Путь к исходному видеофайлу")
     parser.add_argument(
         "subtitles",
         type=Path,
-        help="Путь к файлу субтитров (.srt, .ass, .ssa, .vtt, .json)",
+        nargs="?",
+        default=None,
+        help="Необязательно: путь к готовым субтитрам. Если не указан — создаются автоматически из речи.",
     )
     parser.add_argument(
         "-o",
@@ -37,6 +40,33 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("hard", "soft"),
         default="hard",
         help="Режим: hard (вжечь в видео, по умолчанию) или soft (дорожка без перекодирования)",
+    )
+
+    auto_group = parser.add_argument_group("Автоматическая генерация субтитров (ИИ Whisper)")
+    auto_group.add_argument(
+        "--auto",
+        action="store_true",
+        help="Принудительно распознавать речь из видео (используется автоматически, если файл субтитров не задан)",
+    )
+    auto_group.add_argument(
+        "--model",
+        default="small",
+        help=f"Модель Whisper: {', '.join(WHISPER_MODELS.keys())} (по умолчанию small)",
+    )
+    auto_group.add_argument(
+        "--speech-lang",
+        default="auto",
+        help="Язык речи в видео (auto, ru, en, uk и др.; по умолчанию auto)",
+    )
+    auto_group.add_argument(
+        "--translate",
+        action="store_true",
+        help="Перевести распознанную речь в английские субтитры",
+    )
+    auto_group.add_argument(
+        "--no-save-srt",
+        action="store_true",
+        help="Не сохранять отдельный файл .srt рядом с видео при автогенерации",
     )
 
     style_group = parser.add_argument_group("Оформление субтитров (для режима hard)")
@@ -147,6 +177,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     try:
+        if args.auto or args.subtitles is None:
+            auto_res = auto_subtitle_video(
+                video_path=args.video,
+                output_path=args.output,
+                model_name=args.model,
+                language=args.speech_lang,
+                translate_to_english=args.translate,
+                save_srt=not args.no_save_srt,
+                mode=args.mode,
+                style=style,
+                shift_seconds=args.shift,
+                track_language=args.lang,
+                track_title=args.title,
+                default_track=not args.no_default,
+                crf=args.crf,
+                preset=args.preset,
+                ffmpeg_path=args.ffmpeg,
+                status_callback=print,
+            )
+            print(f"Готово ({auto_res.video_result.mode}): {auto_res.video_result.output_path}")
+            if auto_res.srt_path:
+                print(f"Файл субтитров SRT: {auto_res.srt_path}")
+            return 0
+
         result = add_subtitles(
             video_path=args.video,
             subtitle_source=args.subtitles,

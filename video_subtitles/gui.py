@@ -1,4 +1,4 @@
-"""Графический интерфейс (Tkinter) для добавления субтитров на видео."""
+"""Графический интерфейс (Tkinter) для автоматического создания и наложения субтитров на видео."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from typing import Optional
 from .core import SubtitleResult, SubtitleStyle, add_subtitles, probe_video
 from .fonts import find_default_font_name, list_system_fonts
 from .srt import SubtitleCue, format_timestamp_srt, parse_srt, parse_timestamp, write_srt
+from .transcribe import WHISPER_LANGUAGES, WHISPER_MODELS, transcribe_video
 
 ALIGN_LABELS = {
     "Внизу по центру": "bottom",
     "По центру экрана": "center",
     "Сверху по центру": "top",
 }
-ALIGN_REVERSE = {v: k for k, v in ALIGN_LABELS.items()}
 
 PRESETS = ("ultrafast", "veryfast", "fast", "medium", "slow")
 
@@ -52,16 +52,18 @@ class SubtitleEditorDialog(tk.Toplevel):
         parent: tk.Misc,
         initial_cues: list[SubtitleCue],
         on_apply,
+        apply_label: str = "Использовать эти субтитры",
     ) -> None:
         super().__init__(parent)
         self.title("Редактор субтитров")
-        self.geometry("720x500")
-        self.minsize(600, 420)
+        self.geometry("740x520")
+        self.minsize(620, 420)
         self.transient(parent)
         self.grab_set()
 
         self._cues: list[SubtitleCue] = list(initial_cues)
         self._on_apply = on_apply
+        self._apply_label = apply_label
 
         self._build_ui()
         self._refresh_tree()
@@ -70,7 +72,6 @@ class SubtitleEditorDialog(tk.Toplevel):
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
 
-        # Таблица реплик
         tree_frame = ttk.Frame(root)
         tree_frame.pack(fill="both", expand=True)
 
@@ -84,7 +85,7 @@ class SubtitleEditorDialog(tk.Toplevel):
         self.tree.column("num", width=40, anchor="center", stretch=False)
         self.tree.column("start", width=110, anchor="center", stretch=False)
         self.tree.column("end", width=110, anchor="center", stretch=False)
-        self.tree.column("text", width=400, anchor="w", stretch=True)
+        self.tree.column("text", width=420, anchor="w", stretch=True)
 
         scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -92,7 +93,6 @@ class SubtitleEditorDialog(tk.Toplevel):
         scroll.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self._on_select_row)
 
-        # Поля ввода реплики
         form = ttk.LabelFrame(root, text="Редактирование / добавление реплики", padding=10)
         form.pack(fill="x", pady=(10, 8))
 
@@ -123,7 +123,6 @@ class SubtitleEditorDialog(tk.Toplevel):
             side="left", padx=(6, 0)
         )
 
-        # Нижняя панель
         bottom = ttk.Frame(root)
         bottom.pack(fill="x", pady=(4, 0))
         ttk.Button(bottom, text="Загрузить из .srt...", command=self._load_srt).pack(side="left")
@@ -132,7 +131,7 @@ class SubtitleEditorDialog(tk.Toplevel):
         )
 
         ttk.Button(bottom, text="Отмена", command=self.destroy).pack(side="right")
-        ttk.Button(bottom, text="Использовать эти субтитры", command=self._apply).pack(
+        ttk.Button(bottom, text=self._apply_label, command=self._apply).pack(
             side="right", padx=(0, 8)
         )
 
@@ -177,7 +176,6 @@ class SubtitleEditorDialog(tk.Toplevel):
             return
         self._cues.append(cue)
         self._refresh_tree()
-        # Предлагаем следующий интервал для удобства
         self.start_var.set(format_timestamp_srt(cue.end + 0.2))
         self.end_var.set(format_timestamp_srt(cue.end + 3.2))
         self.text_var.set("")
@@ -240,13 +238,13 @@ class SubtitleEditorDialog(tk.Toplevel):
 
 
 class SubtitleApp:
-    """Главное окно приложения для добавления субтитров на видео."""
+    """Главное окно приложения для автоматического создания и добавления субтитров."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Добавление субтитров на видео")
-        self.root.geometry("820x720")
-        self.root.minsize(740, 650)
+        self.root.title("Автосубтитры на видео")
+        self.root.geometry("860x780")
+        self.root.minsize(760, 700)
 
         self._style_obj = ttk.Style()
         for theme in ("vista", "clam", "default"):
@@ -254,14 +252,27 @@ class SubtitleApp:
                 self._style_obj.theme_use(theme)
                 break
 
+        # Основные пути
         self.video_path_var = tk.StringVar()
-        self.video_info_var = tk.StringVar(value="Файл не выбран")
-        self.sub_path_var = tk.StringVar()
+        self.video_info_var = tk.StringVar(value="Выберите видеофайл — субтитры создадутся автоматически")
         self.out_path_var = tk.StringVar()
-        self.mode_var = tk.StringVar(value="hard")
 
-        # Встроенные реплики из редактора (если пользователь создал их вручную)
+        # Источник субтитров: auto / file / editor
+        self.source_mode_var = tk.StringVar(value="auto")
+        self.sub_path_var = tk.StringVar()
         self._editor_cues: Optional[list[SubtitleCue]] = None
+
+        # Настройки Whisper (auto)
+        self._model_labels = {label: key for key, label in WHISPER_MODELS.items()}
+        self.model_label_var = tk.StringVar(value=WHISPER_MODELS["small"])
+        self._lang_labels = {label: key for key, label in WHISPER_LANGUAGES.items()}
+        self.speech_lang_label_var = tk.StringVar(value=WHISPER_LANGUAGES["auto"])
+        self.translate_var = tk.BooleanVar(value=False)
+        self.save_srt_var = tk.BooleanVar(value=True)
+        self.review_before_burn_var = tk.BooleanVar(value=False)
+
+        # Режим наложения
+        self.mode_var = tk.StringVar(value="hard")
 
         # Стиль Hardsub
         default_font = find_default_font_name() or "Arial"
@@ -287,14 +298,16 @@ class SubtitleApp:
         self.crf_var = tk.IntVar(value=18)
         self.preset_var = tk.StringVar(value="medium")
 
-        self.status_var = tk.StringVar(value="Выберите видео и субтитры для начала работы.")
+        self.status_var = tk.StringVar(value="Выберите видео и нажмите «Создать и добавить субтитры».")
         self.progress_var = tk.DoubleVar(value=0.0)
         self._is_running = False
         self._last_output: Optional[Path] = None
+        self._last_srt: Optional[Path] = None
 
         self._system_fonts = self._collect_fonts(default_font)
         self._build_ui()
         self._bind_preview_updates()
+        self._on_source_mode_change()
         self._on_mode_change()
         self._update_preview()
 
@@ -310,82 +323,148 @@ class SubtitleApp:
         container = ttk.Frame(self.root, padding=14)
         container.pack(fill="both", expand=True)
 
-        # --- 1. Файлы ---
-        files_frame = ttk.LabelFrame(container, text="1. Файлы", padding=10)
-        files_frame.pack(fill="x")
-        files_frame.columnconfigure(1, weight=1)
+        # --- 1. Видео ---
+        video_frame = ttk.LabelFrame(container, text="1. Видео", padding=10)
+        video_frame.pack(fill="x")
+        video_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(files_frame, text="Видеофайл:").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Entry(files_frame, textvariable=self.video_path_var).grid(
-            row=0, column=1, sticky="ew", padx=8, pady=4
+        ttk.Label(video_frame, text="Видеофайл:").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Entry(video_frame, textvariable=self.video_path_var).grid(
+            row=0, column=1, sticky="ew", padx=8, pady=3
         )
-        ttk.Button(files_frame, text="Выбрать видео...", command=self._browse_video).grid(
-            row=0, column=2, sticky="ew", pady=4
+        ttk.Button(video_frame, text="Выбрать видео...", command=self._browse_video).grid(
+            row=0, column=2, sticky="ew", pady=3
         )
 
         ttk.Label(
-            files_frame, textvariable=self.video_info_var, foreground="#555555"
+            video_frame, textvariable=self.video_info_var, foreground="#555555"
         ).grid(row=1, column=1, columnspan=2, sticky="w", padx=8)
 
-        ttk.Label(files_frame, text="Субтитры:").grid(row=2, column=0, sticky="w", pady=4)
-        self.sub_entry = ttk.Entry(files_frame, textvariable=self.sub_path_var)
-        self.sub_entry.grid(row=2, column=1, sticky="ew", padx=8, pady=4)
-        sub_btns = ttk.Frame(files_frame)
-        sub_btns.grid(row=2, column=2, sticky="ew", pady=4)
-        ttk.Button(sub_btns, text="Выбрать файл...", command=self._browse_subtitles).pack(
-            side="left"
+        ttk.Label(video_frame, text="Сохранить результат:").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Entry(video_frame, textvariable=self.out_path_var).grid(
+            row=2, column=1, sticky="ew", padx=8, pady=3
         )
-        ttk.Button(sub_btns, text="Редактор...", command=self._open_editor).pack(
-            side="left", padx=(6, 0)
+        ttk.Button(video_frame, text="Обзор...", command=self._browse_output).grid(
+            row=2, column=2, sticky="ew", pady=3
         )
 
-        ttk.Label(files_frame, text="Сохранить как:").grid(row=3, column=0, sticky="w", pady=4)
-        ttk.Entry(files_frame, textvariable=self.out_path_var).grid(
-            row=3, column=1, sticky="ew", padx=8, pady=4
-        )
-        ttk.Button(files_frame, text="Обзор...", command=self._browse_output).grid(
-            row=3, column=2, sticky="ew", pady=4
-        )
+        # --- 2. Откуда взять субтитры ---
+        src_frame = ttk.LabelFrame(container, text="2. Создание / источник субтитров", padding=10)
+        src_frame.pack(fill="x", pady=(10, 0))
+        src_frame.columnconfigure(1, weight=1)
 
-        # --- 2. Режим ---
-        mode_frame = ttk.LabelFrame(container, text="2. Режим добавления", padding=10)
+        ttk.Radiobutton(
+            src_frame,
+            text="Автоматически распознать речь из видео (ИИ Whisper — ничего не нужно готовить)",
+            variable=self.source_mode_var,
+            value="auto",
+            command=self._on_source_mode_change,
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+
+        # Панель параметров Whisper
+        self.auto_panel = ttk.Frame(src_frame, padding=(22, 4, 0, 4))
+        self.auto_panel.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self.auto_panel.columnconfigure(1, weight=1)
+
+        ttk.Label(self.auto_panel, text="Модель ИИ:").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Combobox(
+            self.auto_panel,
+            textvariable=self.model_label_var,
+            values=list(WHISPER_MODELS.values()),
+            state="readonly",
+            width=48,
+        ).grid(row=0, column=1, sticky="w", padx=(6, 16), pady=3)
+
+        ttk.Label(self.auto_panel, text="Язык речи:").grid(row=0, column=2, sticky="w", pady=3)
+        ttk.Combobox(
+            self.auto_panel,
+            textvariable=self.speech_lang_label_var,
+            values=list(WHISPER_LANGUAGES.values()),
+            state="readonly",
+            width=20,
+        ).grid(row=0, column=3, sticky="w", padx=(6, 0), pady=3)
+
+        auto_checks = ttk.Frame(self.auto_panel)
+        auto_checks.grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Checkbutton(
+            auto_checks, text="Сохранить файл .srt рядом с видео", variable=self.save_srt_var
+        ).pack(side="left")
+        ttk.Checkbutton(
+            auto_checks,
+            text="Проверить текст в редакторе перед наложением",
+            variable=self.review_before_burn_var,
+        ).pack(side="left", padx=(14, 0))
+        ttk.Checkbutton(
+            auto_checks, text="Перевести на английский", variable=self.translate_var
+        ).pack(side="left", padx=(14, 0))
+
+        ttk.Radiobutton(
+            src_frame,
+            text="Использовать готовый файл субтитров (.srt, .ass, .vtt, .json)",
+            variable=self.source_mode_var,
+            value="file",
+            command=self._on_source_mode_change,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        self.file_panel = ttk.Frame(src_frame, padding=(22, 4, 0, 2))
+        self.file_panel.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.file_panel.columnconfigure(0, weight=1)
+
+        self.sub_entry = ttk.Entry(self.file_panel, textvariable=self.sub_path_var)
+        self.sub_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.sub_browse_btn = ttk.Button(
+            self.file_panel, text="Выбрать файл...", command=self._browse_subtitles
+        )
+        self.sub_browse_btn.grid(row=0, column=1)
+
+        ed_row = ttk.Frame(src_frame)
+        ed_row.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Radiobutton(
+            ed_row,
+            text="Создать или отредактировать вручную в редакторе",
+            variable=self.source_mode_var,
+            value="editor",
+            command=self._on_source_mode_change,
+        ).pack(side="left")
+        self.editor_btn = ttk.Button(ed_row, text="Открыть редактор...", command=self._open_editor)
+        self.editor_btn.pack(side="left", padx=(12, 0))
+
+        # --- 3. Как добавить на видео ---
+        mode_frame = ttk.LabelFrame(container, text="3. Как добавить субтитры на видео", padding=8)
         mode_frame.pack(fill="x", pady=(10, 0))
 
         ttk.Radiobutton(
             mode_frame,
-            text="Вжечь в кадр (Hardsub) — видны в любом плеере, можно настроить стиль",
+            text="Вжечь в кадр (Hardsub) — видны всегда и везде, настраиваемый стиль",
             variable=self.mode_var,
             value="hard",
             command=self._on_mode_change,
-        ).pack(anchor="w")
+        ).pack(side="left")
         ttk.Radiobutton(
             mode_frame,
-            text="Отдельная дорожка (Softsub) — можно включать/выключать, без перекодирования",
+            text="Отдельная дорожка (Softsub) — можно включать/выключать",
             variable=self.mode_var,
             value="soft",
             command=self._on_mode_change,
-        ).pack(anchor="w", pady=(4, 0))
+        ).pack(side="left", padx=(18, 0))
 
-        # --- 3. Настройки ---
+        # --- 4. Настройки ---
         self.notebook = ttk.Notebook(container)
         self.notebook.pack(fill="both", expand=True, pady=(10, 0))
 
-        # Вкладка Hardsub
         self.hard_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.hard_tab, text="Оформление (Hardsub)")
         self._build_hard_tab(self.hard_tab)
 
-        # Вкладка Softsub
         self.soft_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.soft_tab, text="Дорожка (Softsub)")
         self._build_soft_tab(self.soft_tab)
 
-        # Вкладка Дополнительно
         self.adv_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.adv_tab, text="Тайминг и качество")
         self._build_advanced_tab(self.adv_tab)
 
-        # --- 4. Запуск и прогресс ---
+        # --- 5. Запуск и прогресс ---
         bottom = ttk.Frame(container, padding=(0, 10, 0, 0))
         bottom.pack(fill="x")
 
@@ -410,7 +489,7 @@ class SubtitleApp:
         self.open_folder_btn.pack(side="right", padx=(6, 0))
 
         self.run_btn = ttk.Button(
-            status_row, text="Добавить субтитры", command=self._start_processing
+            status_row, text="Создать и добавить субтитры", command=self._start_processing
         )
         self.run_btn.pack(side="right")
 
@@ -418,22 +497,22 @@ class SubtitleApp:
         parent.columnconfigure(1, weight=1)
         parent.columnconfigure(3, weight=1)
 
-        ttk.Label(parent, text="Шрифт:").grid(row=0, column=0, sticky="w", pady=4)
-        font_combo = ttk.Combobox(
+        ttk.Label(parent, text="Шрифт:").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Combobox(
             parent, textvariable=self.font_var, values=self._system_fonts, state="normal"
-        )
-        font_combo.grid(row=0, column=1, sticky="ew", padx=(6, 16), pady=4)
+        ).grid(row=0, column=1, sticky="ew", padx=(6, 16), pady=3)
 
-        ttk.Label(parent, text="Размер:").grid(row=0, column=2, sticky="w", pady=4)
+        ttk.Label(parent, text="Размер:").grid(row=0, column=2, sticky="w", pady=3)
         ttk.Spinbox(parent, from_=10, to=96, textvariable=self.font_size_var, width=8).grid(
-            row=0, column=3, sticky="w", padx=(6, 0), pady=4
+            row=0, column=3, sticky="w", padx=(6, 0), pady=3
         )
 
-        # Цвета
-        ttk.Label(parent, text="Цвет текста:").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(parent, text="Цвет текста:").grid(row=1, column=0, sticky="w", pady=3)
         c1_frame = ttk.Frame(parent)
-        c1_frame.grid(row=1, column=1, sticky="w", padx=(6, 16), pady=4)
-        self.primary_swatch = tk.Label(c1_frame, width=3, bg=self.primary_color_var.get(), relief="solid", bd=1)
+        c1_frame.grid(row=1, column=1, sticky="w", padx=(6, 16), pady=3)
+        self.primary_swatch = tk.Label(
+            c1_frame, width=3, bg=self.primary_color_var.get(), relief="solid", bd=1
+        )
         self.primary_swatch.pack(side="left")
         ttk.Entry(c1_frame, textvariable=self.primary_color_var, width=10).pack(side="left", padx=6)
         ttk.Button(
@@ -442,10 +521,12 @@ class SubtitleApp:
             command=lambda: self._pick_color(self.primary_color_var, self.primary_swatch),
         ).pack(side="left")
 
-        ttk.Label(parent, text="Цвет обводки:").grid(row=1, column=2, sticky="w", pady=4)
+        ttk.Label(parent, text="Цвет обводки:").grid(row=1, column=2, sticky="w", pady=3)
         c2_frame = ttk.Frame(parent)
-        c2_frame.grid(row=1, column=3, sticky="w", padx=(6, 0), pady=4)
-        self.outline_swatch = tk.Label(c2_frame, width=3, bg=self.outline_color_var.get(), relief="solid", bd=1)
+        c2_frame.grid(row=1, column=3, sticky="w", padx=(6, 0), pady=3)
+        self.outline_swatch = tk.Label(
+            c2_frame, width=3, bg=self.outline_color_var.get(), relief="solid", bd=1
+        )
         self.outline_swatch.pack(side="left")
         ttk.Entry(c2_frame, textvariable=self.outline_color_var, width=10).pack(side="left", padx=6)
         ttk.Button(
@@ -454,34 +535,32 @@ class SubtitleApp:
             command=lambda: self._pick_color(self.outline_color_var, self.outline_swatch),
         ).pack(side="left")
 
-        # Обводка, тень, положение, отступ
-        ttk.Label(parent, text="Толщина обводки:").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(parent, text="Толщина обводки:").grid(row=2, column=0, sticky="w", pady=3)
         ttk.Spinbox(
             parent, from_=0.0, to=8.0, increment=0.5, textvariable=self.outline_var, width=8
-        ).grid(row=2, column=1, sticky="w", padx=(6, 16), pady=4)
+        ).grid(row=2, column=1, sticky="w", padx=(6, 16), pady=3)
 
-        ttk.Label(parent, text="Положение:").grid(row=2, column=2, sticky="w", pady=4)
+        ttk.Label(parent, text="Положение:").grid(row=2, column=2, sticky="w", pady=3)
         ttk.Combobox(
             parent,
             textvariable=self.align_label_var,
             values=list(ALIGN_LABELS.keys()),
             state="readonly",
             width=20,
-        ).grid(row=2, column=3, sticky="w", padx=(6, 0), pady=4)
+        ).grid(row=2, column=3, sticky="w", padx=(6, 0), pady=3)
 
-        ttk.Label(parent, text="Отступ по вертикали:").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Label(parent, text="Отступ по вертикали:").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Spinbox(parent, from_=0, to=200, textvariable=self.margin_v_var, width=8).grid(
-            row=3, column=1, sticky="w", padx=(6, 16), pady=4
+            row=3, column=1, sticky="w", padx=(6, 16), pady=3
         )
 
-        ttk.Label(parent, text="Тень:").grid(row=3, column=2, sticky="w", pady=4)
+        ttk.Label(parent, text="Тень:").grid(row=3, column=2, sticky="w", pady=3)
         ttk.Spinbox(
             parent, from_=0.0, to=8.0, increment=0.5, textvariable=self.shadow_var, width=8
-        ).grid(row=3, column=3, sticky="w", padx=(6, 0), pady=4)
+        ).grid(row=3, column=3, sticky="w", padx=(6, 0), pady=3)
 
-        # Флажки
         flags_frame = ttk.Frame(parent)
-        flags_frame.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 6))
+        flags_frame.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 4))
         ttk.Checkbutton(flags_frame, text="Жирный", variable=self.bold_var).pack(side="left")
         ttk.Checkbutton(flags_frame, text="Курсив", variable=self.italic_var).pack(
             side="left", padx=(14, 0)
@@ -490,12 +569,11 @@ class SubtitleApp:
             flags_frame, text="Полупрозрачная плашка под текстом", variable=self.box_var
         ).pack(side="left", padx=(14, 0))
 
-        # Мини-превью
         preview_box = ttk.LabelFrame(parent, text="Предпросмотр стиля", padding=6)
         preview_box.grid(row=5, column=0, columnspan=4, sticky="nsew", pady=(4, 0))
         parent.rowconfigure(5, weight=1)
 
-        self.preview_canvas = tk.Canvas(preview_box, height=110, bg="#1B263B", highlightthickness=0)
+        self.preview_canvas = tk.Canvas(preview_box, height=96, bg="#1B263B", highlightthickness=0)
         self.preview_canvas.pack(fill="both", expand=True)
         self.preview_canvas.bind("<Configure>", lambda _e: self._update_preview())
 
@@ -523,8 +601,7 @@ class SubtitleApp:
 
         ttk.Label(
             parent,
-            text="Примечание: в режиме Softsub видео и аудио копируются без перекодирования,\n"
-            "поэтому обработка занимает пару секунд.",
+            text="Примечание: в режиме Softsub видео и аудио копируются без перекодирования.",
             foreground="#555555",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
@@ -574,6 +651,29 @@ class SubtitleApp:
         for var in vars_to_watch:
             var.trace_add("write", lambda *_args: self._update_preview())
 
+    def _set_frame_children_state(self, frame: ttk.Frame, state: str) -> None:
+        for child in frame.winfo_children():
+            if isinstance(child, ttk.Frame):
+                self._set_frame_children_state(child, state)
+            else:
+                try:
+                    if isinstance(child, ttk.Combobox) and state == "normal":
+                        child.configure(state="readonly")
+                    else:
+                        child.configure(state=state)
+                except tk.TclError:
+                    pass
+
+    def _on_source_mode_change(self) -> None:
+        src_mode = self.source_mode_var.get()
+        self._set_frame_children_state(self.auto_panel, "normal" if src_mode == "auto" else "disabled")
+        self._set_frame_children_state(self.file_panel, "normal" if src_mode == "file" else "disabled")
+        self.editor_btn.configure(state="normal" if src_mode == "editor" else "disabled")
+        if src_mode == "auto":
+            self.run_btn.configure(text="Создать и добавить субтитры")
+        else:
+            self.run_btn.configure(text="Добавить субтитры")
+
     def _on_mode_change(self) -> None:
         if self.mode_var.get() == "hard":
             self.notebook.select(self.hard_tab)
@@ -582,7 +682,9 @@ class SubtitleApp:
 
     def _pick_color(self, target_var: tk.StringVar, swatch: tk.Label) -> None:
         initial = target_var.get() if target_var.get().startswith("#") else "#FFFFFF"
-        _rgb, hex_color = colorchooser.askcolor(color=initial, parent=self.root, title="Выбор цвета")
+        _rgb, hex_color = colorchooser.askcolor(
+            color=initial, parent=self.root, title="Выбор цвета"
+        )
         if hex_color:
             target_var.set(hex_color.upper())
             try:
@@ -596,14 +698,14 @@ class SubtitleApp:
         canvas = self.preview_canvas
         canvas.delete("all")
         w = max(canvas.winfo_width(), 320)
-        h = max(canvas.winfo_height(), 100)
+        h = max(canvas.winfo_height(), 90)
 
         font_name = self.font_var.get().strip() or "Arial"
         try:
             raw_size = int(self.font_size_var.get())
         except Exception:
             raw_size = 24
-        preview_size = max(10, min(32, int(raw_size * 0.72)))
+        preview_size = max(10, min(30, int(raw_size * 0.72)))
 
         weight = "bold" if self.bold_var.get() else "normal"
         slant = "italic" if self.italic_var.get() else "roman"
@@ -619,15 +721,14 @@ class SubtitleApp:
 
         align = ALIGN_LABELS.get(self.align_label_var.get(), "bottom")
         if align == "top":
-            y = 24
+            y = 22
         elif align == "center":
             y = h // 2
         else:
-            y = h - 24
+            y = h - 22
         x = w // 2
         sample_text = "Пример субтитров • Sample Subtitle"
 
-        # Плашка под текстом
         if self.box_var.get():
             temp_id = canvas.create_text(x, y, text=sample_text, font=font_spec)
             bbox = canvas.bbox(temp_id)
@@ -642,7 +743,6 @@ class SubtitleApp:
                     outline="",
                 )
 
-        # Имитация обводки
         try:
             outline_px = int(round(float(self.outline_var.get())))
         except Exception:
@@ -654,7 +754,9 @@ class SubtitleApp:
                     if dx == 0 and dy == 0:
                         continue
                     try:
-                        canvas.create_text(x + dx, y + dy, text=sample_text, font=font_spec, fill=outline)
+                        canvas.create_text(
+                            x + dx, y + dy, text=sample_text, font=font_spec, fill=outline
+                        )
                     except tk.TclError:
                         pass
 
@@ -676,8 +778,7 @@ class SubtitleApp:
             return
         src = Path(path)
         self.video_path_var.set(str(src))
-        if not self.out_path_var.get().strip():
-            self.out_path_var.set(str(src.with_name(f"{src.stem}_subtitled{src.suffix}")))
+        self.out_path_var.set(str(src.with_name(f"{src.stem}_subtitled{src.suffix}")))
 
         try:
             info = probe_video(src)
@@ -686,7 +787,7 @@ class SubtitleApp:
                 parts.append(f"{info.width}×{info.height}")
             if info.duration is not None:
                 parts.append(f"длительность {info.duration:.1f} сек")
-            parts.append("со звуком" if info.has_audio else "без звука")
+            parts.append("со звуком" if info.has_audio else "без звука (распознавание речи недоступно)")
             self.video_info_var.set(" • ".join(parts))
         except Exception as exc:
             self.video_info_var.set(f"Не удалось прочитать метаданные: {exc}")
@@ -700,10 +801,8 @@ class SubtitleApp:
                 ("Все файлы", "*.*"),
             ],
         )
-        if not path:
-            return
-        self._editor_cues = None
-        self.sub_path_var.set(path)
+        if path:
+            self.sub_path_var.set(path)
 
     def _browse_output(self) -> None:
         initial_name = "output_subtitled.mp4"
@@ -727,22 +826,33 @@ class SubtitleApp:
             self.out_path_var.set(path)
 
     def _open_editor(self) -> None:
-        initial: list[SubtitleCue] = []
-        if self._editor_cues is not None:
-            initial = list(self._editor_cues)
-        else:
-            cur_sub = self.sub_path_var.get().strip()
-            if cur_sub and Path(cur_sub).is_file() and cur_sub.lower().endswith(".srt"):
-                try:
-                    initial = parse_srt(Path(cur_sub).read_text(encoding="utf-8-sig"))
-                except Exception:
-                    initial = []
+        initial = list(self._editor_cues) if self._editor_cues else []
 
         def on_apply(cues: list[SubtitleCue]) -> None:
             self._editor_cues = cues
-            self.sub_path_var.set(f"[Из редактора: {len(cues)} реплик]")
+            self.status_var.set(f"В редакторе подготовлено реплик: {len(cues)}")
 
         SubtitleEditorDialog(self.root, initial, on_apply)
+
+    def _read_style_and_encoding(self) -> tuple[SubtitleStyle, float, int, str]:
+        style = SubtitleStyle(
+            font_name=self.font_var.get().strip() or None,
+            font_size=int(self.font_size_var.get()),
+            primary_color=self.primary_color_var.get().strip() or "#FFFFFF",
+            outline_color=self.outline_color_var.get().strip() or "#000000",
+            back_color="#00000080",
+            outline=float(self.outline_var.get()),
+            shadow=float(self.shadow_var.get()),
+            bold=bool(self.bold_var.get()),
+            italic=bool(self.italic_var.get()),
+            alignment=ALIGN_LABELS.get(self.align_label_var.get(), "bottom"),
+            margin_v=int(self.margin_v_var.get()),
+            border_style=3 if self.box_var.get() else 1,
+        )
+        shift_sec = float(self.shift_var.get())
+        crf = int(self.crf_var.get())
+        preset = self.preset_var.get()
+        return style, shift_sec, crf, preset
 
     def _start_processing(self) -> None:
         if self._is_running:
@@ -750,42 +860,26 @@ class SubtitleApp:
 
         video_str = self.video_path_var.get().strip()
         if not video_str or not Path(video_str).is_file():
-            messagebox.showerror("Ошибка", "Выберите существующий видеофайл.", parent=self.root)
+            messagebox.showerror("Ошибка", "Сначала выберите видеофайл.", parent=self.root)
             return
 
-        if self._editor_cues is not None:
-            sub_source = list(self._editor_cues)
-        else:
+        src_mode = self.source_mode_var.get()
+        if src_mode == "file":
             sub_str = self.sub_path_var.get().strip()
             if not sub_str or not Path(sub_str).is_file():
-                messagebox.showerror(
-                    "Ошибка",
-                    "Выберите файл субтитров или создайте их через кнопку «Редактор...».",
-                    parent=self.root,
-                )
+                messagebox.showerror("Ошибка", "Выберите существующий файл субтитров.", parent=self.root)
                 return
-            sub_source = sub_str
+        elif src_mode == "editor" and not self._editor_cues:
+            messagebox.showerror(
+                "Ошибка", "Откройте редактор и добавьте хотя бы одну реплику.", parent=self.root
+            )
+            return
 
         out_str = self.out_path_var.get().strip()
         out_path = Path(out_str) if out_str else None
 
         try:
-            style = SubtitleStyle(
-                font_name=self.font_var.get().strip() or None,
-                font_size=int(self.font_size_var.get()),
-                primary_color=self.primary_color_var.get().strip() or "#FFFFFF",
-                outline_color=self.outline_color_var.get().strip() or "#000000",
-                back_color="#00000080",
-                outline=float(self.outline_var.get()),
-                shadow=float(self.shadow_var.get()),
-                bold=bool(self.bold_var.get()),
-                italic=bool(self.italic_var.get()),
-                alignment=ALIGN_LABELS.get(self.align_label_var.get(), "bottom"),
-                margin_v=int(self.margin_v_var.get()),
-                border_style=3 if self.box_var.get() else 1,
-            )
-            shift_sec = float(self.shift_var.get())
-            crf = int(self.crf_var.get())
+            style, shift_sec, crf, preset = self._read_style_and_encoding()
         except ValueError as exc:
             messagebox.showerror("Ошибка параметров", str(exc), parent=self.root)
             return
@@ -794,29 +888,27 @@ class SubtitleApp:
         lang = self.lang_var.get().strip() or "rus"
         title = self.title_var.get().strip() or None
         default_track = bool(self.default_track_var.get())
-        preset = self.preset_var.get()
 
-        self._is_running = True
-        self._last_output = None
-        self.run_btn.configure(state="disabled")
-        self.open_folder_btn.configure(state="disabled")
-        self.open_video_btn.configure(state="disabled")
+        model_key = self._model_labels.get(self.model_label_var.get(), "small")
+        speech_lang = self._lang_labels.get(self.speech_lang_label_var.get(), "auto")
+        translate = bool(self.translate_var.get())
+        save_srt = bool(self.save_srt_var.get())
+        review_before_burn = bool(self.review_before_burn_var.get())
+
+        self._set_busy(True)
         self.progress_var.set(0.0)
-        self.status_var.set("Обработка видео... Пожалуйста, подождите.")
+        self.status_var.set("Подготовка...")
 
-        def on_progress(ratio: float) -> None:
-            pct = max(0.0, min(100.0, ratio * 100.0))
-            self.root.after(
-                0,
-                lambda: (
-                    self.progress_var.set(pct),
-                    self.status_var.set(f"Обработка видео: {pct:.0f}%"),
-                ),
-            )
+        def set_progress(pct: float) -> None:
+            self.root.after(0, lambda p=pct: self.progress_var.set(max(0.0, min(100.0, p))))
 
-        def worker() -> None:
+        def set_status(msg: str) -> None:
+            self.root.after(0, lambda m=msg: self.status_var.set(m))
+
+        def finish_render(sub_source, srt_saved: Optional[Path]) -> None:
             try:
-                result = add_subtitles(
+                set_status("Наложение субтитров на видео...")
+                res = add_subtitles(
                     video_path=video_str,
                     subtitle_source=sub_source,
                     output_path=out_path,
@@ -828,27 +920,98 @@ class SubtitleApp:
                     default_track=default_track,
                     crf=crf,
                     preset=preset,
-                    progress_callback=on_progress,
+                    progress_callback=lambda r: set_progress(
+                        (55.0 + r * 45.0) if src_mode == "auto" else (r * 100.0)
+                    ),
                 )
-                self.root.after(0, lambda: self._on_success(result))
+                self.root.after(0, lambda: self._on_success(res, srt_saved))
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: self._on_error(err))
+
+        def worker() -> None:
+            try:
+                if src_mode == "file":
+                    finish_render(self.sub_path_var.get().strip(), None)
+                    return
+
+                if src_mode == "editor":
+                    assert self._editor_cues is not None
+                    finish_render(list(self._editor_cues), None)
+                    return
+
+                # src_mode == "auto": сначала распознаём речь
+                cues = transcribe_video(
+                    video_str,
+                    model_name=model_key,
+                    language=speech_lang,
+                    translate_to_english=translate,
+                    progress_callback=lambda r: set_progress(r * 55.0),
+                    status_callback=set_status,
+                )
+
+                saved_srt: Optional[Path] = None
+                if save_srt:
+                    target_srt = (
+                        out_path.with_suffix(".srt")
+                        if out_path is not None
+                        else Path(video_str).with_suffix(".srt")
+                    )
+                    saved_srt = write_srt(cues, target_srt)
+
+                if review_before_burn:
+                    def open_review() -> None:
+                        self._set_busy(False)
+                        self.status_var.set("Проверьте распознанные субтитры и нажмите «Наложить».")
+
+                        def on_confirmed(edited_cues: list[SubtitleCue]) -> None:
+                            if saved_srt is not None:
+                                write_srt(edited_cues, saved_srt)
+                            self._set_busy(True)
+                            threading.Thread(
+                                target=lambda: finish_render(edited_cues, saved_srt),
+                                daemon=True,
+                            ).start()
+
+                        SubtitleEditorDialog(
+                            self.root,
+                            cues,
+                            on_confirmed,
+                            apply_label="Наложить на видео",
+                        )
+
+                    self.root.after(0, open_review)
+                else:
+                    finish_render(cues, saved_srt)
             except Exception as exc:
                 self.root.after(0, lambda err=exc: self._on_error(err))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_success(self, result: SubtitleResult) -> None:
-        self._is_running = False
+    def _set_busy(self, busy: bool) -> None:
+        self._is_running = busy
+        self.run_btn.configure(state="disabled" if busy else "normal")
+        if busy:
+            self._last_output = None
+            self._last_srt = None
+            self.open_folder_btn.configure(state="disabled")
+            self.open_video_btn.configure(state="disabled")
+
+    def _on_success(self, result: SubtitleResult, srt_path: Optional[Path]) -> None:
+        self._set_busy(False)
         self._last_output = result.output_path
+        self._last_srt = srt_path
         self.progress_var.set(100.0)
-        self.run_btn.configure(state="normal")
         self.open_folder_btn.configure(state="normal")
         self.open_video_btn.configure(state="normal")
         self.status_var.set(f"Готово! Сохранено: {result.output_path.name}")
-        messagebox.showinfo("Готово", f"Видео с субтитрами сохранено:\n{result.output_path}", parent=self.root)
+
+        msg = f"Видео с субтитрами готово:\n{result.output_path}"
+        if srt_path:
+            msg += f"\n\nФайл субтитров (.srt):\n{srt_path}"
+        messagebox.showinfo("Готово", msg, parent=self.root)
 
     def _on_error(self, exc: Exception) -> None:
-        self._is_running = False
-        self.run_btn.configure(state="normal")
+        self._set_busy(False)
         self.status_var.set("Произошла ошибка при обработке.")
         messagebox.showerror("Ошибка", str(exc), parent=self.root)
 

@@ -10,10 +10,13 @@ import pytest
 
 from video_subtitles import (
     SubtitleCue,
+    SubtitleError,
     SubtitleStyle,
     add_subtitles,
+    auto_subtitle_video,
     color_to_ass,
     cues_from_json,
+    extract_audio_16k_mono,
     find_ffmpeg,
     format_srt,
     format_timestamp_srt,
@@ -21,6 +24,8 @@ from video_subtitles import (
     parse_timestamp,
     probe_video,
     shift_cues,
+    transcribe_video,
+    wrap_subtitle_text,
     write_srt,
 )
 from video_subtitles.cli import main as cli_main
@@ -227,3 +232,87 @@ def test_cli_execution(tmp_path: Path) -> None:
 
     bad_exit = cli_main([str(tmp_path / "missing.mp4"), str(srt)])
     assert bad_exit == 1
+
+
+def test_wrap_subtitle_text() -> None:
+    short = "Короткая фраза"
+    assert wrap_subtitle_text(short, max_line_chars=42) == short
+
+    long_text = "Это достаточно длинная фраза для проверки переноса текста на две строки в субтитрах"
+    wrapped = wrap_subtitle_text(long_text, max_line_chars=42)
+    lines = wrapped.splitlines()
+    assert len(lines) == 2
+    assert all(line.strip() for line in lines)
+
+
+def test_extract_audio_16k_mono(tmp_path: Path) -> None:
+    with_audio = _make_sample_video(tmp_path / "audio.mp4", with_audio=True, duration=1.0)
+    pcm = extract_audio_16k_mono(with_audio)
+    assert pcm.ndim == 1
+    assert 15000 <= len(pcm) <= 17000
+    assert float(pcm.max()) <= 1.01
+    assert float(pcm.min()) >= -1.01
+
+    silent = _make_sample_video(tmp_path / "silent.mp4", with_audio=False, duration=1.0)
+    with pytest.raises(SubtitleError):
+        extract_audio_16k_mono(silent)
+
+
+def test_auto_subtitle_pipeline_with_mocked_whisper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pywhispercpp.model as pw_model
+
+    src = _make_sample_video(tmp_path / "speech.mp4", with_audio=True, duration=1.5)
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "ggml-tiny.bin").write_bytes(b"fake-ggml-model")
+
+    class FakeSegment:
+        def __init__(self, t0: int, t1: int, text: str) -> None:
+            self.t0 = t0
+            self.t1 = t1
+            self.text = text
+
+    class FakeModel:
+        def __init__(self, model_path: str, **_kwargs) -> None:
+            assert Path(model_path).name == "ggml-tiny.bin"
+
+        def transcribe(self, audio, new_segment_callback=None, **_params):
+            assert len(audio) > 10000
+            segs = [
+                FakeSegment(0, 70, "Привет, это автосубтитры"),
+                FakeSegment(75, 145, "Работает без подготовки файла"),
+            ]
+            if new_segment_callback:
+                for s in segs:
+                    new_segment_callback(s)
+            return segs
+
+    monkeypatch.setattr(pw_model, "Model", FakeModel)
+
+    # Проверяем transcribe_video напрямую
+    cues = transcribe_video(
+        src,
+        model_name="tiny",
+        language="ru",
+        models_dir=models_dir,
+    )
+    assert len(cues) == 2
+    assert cues[0].text == "Привет, это автосубтитры"
+
+    # Проверяем полный цикл auto_subtitle_video (с патчем models_dir по умолчанию)
+    monkeypatch.setattr("video_subtitles.transcribe._default_models_dir", lambda: models_dir)
+    out = tmp_path / "auto_out.mp4"
+    res = auto_subtitle_video(
+        src,
+        out,
+        model_name="tiny",
+        language="ru",
+        save_srt=True,
+        preset="ultrafast",
+    )
+    assert res.video_result.output_path.is_file()
+    assert res.srt_path is not None and res.srt_path.is_file()
+    assert len(parse_srt(res.srt_path.read_text(encoding="utf-8"))) == 2
+
